@@ -72,6 +72,8 @@ import java.nio.channels.ClosedChannelException;
 import java.security.KeyStore;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -569,15 +571,28 @@ public class SslHandlerTest {
     @Test(timeout = 30000)
     public void testCompositeBufSizeEstimationGuaranteesSynchronousWrite()
             throws CertificateException, SSLException, ExecutionException, InterruptedException {
-        SslProvider[] providers = SslProvider.values();
-        for (int i = 0; i < providers.length; ++i) {
-            for (int j = 0; j < providers.length; ++j) {
-                compositeBufSizeEstimationGuaranteesSynchronousWrite(providers[i], providers[j]);
+        List<SslProvider> providers = new ArrayList<SslProvider>();
+
+        for (SslProvider provider: SslProvider.values()) {
+            switch (provider) {
+                case OPENSSL:
+                case OPENSSL_REFCNT:
+                    if (!OpenSsl.isAvailable()) {
+                        continue;
+                    }
+                default:
+                    providers.add(provider);
+            }
+        }
+
+        for (int i = 0; i < providers.size(); ++i) {
+            for (int j = 0; j < providers.size(); ++j) {
+                compositeBufSizeEstimationGuaranteesSynchronousWrite(providers.get(i), providers.get(j));
             }
         }
     }
 
-    private void compositeBufSizeEstimationGuaranteesSynchronousWrite(
+    private static void compositeBufSizeEstimationGuaranteesSynchronousWrite(
             SslProvider serverProvider, SslProvider clientProvider)
             throws CertificateException, SSLException, ExecutionException, InterruptedException {
         SelfSignedCertificate ssc = new SelfSignedCertificate();
