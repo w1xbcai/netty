@@ -62,7 +62,7 @@ public class LocalChannel extends AbstractChannel {
 
     private final ChannelConfig config = new DefaultChannelConfig(this);
     // To further optimize this we could write our own SPSC queue.
-    private final Queue<Object> inboundBuffer = PlatformDependent.newSpscQueue();
+    final Queue<Object> inboundBuffer = PlatformDependent.newSpscQueue();
     private final Runnable readTask = new Runnable() {
         @Override
         public void run() {
@@ -246,34 +246,42 @@ public class LocalChannel extends AbstractChannel {
 
         if (peer != null) {
             this.peer = null;
-            // Need to execute the close in the correct EventLoop (see https://github.com/netty/netty/issues/1777).
-            // Also check if the registration was not done yet. In this case we submit the close to the EventLoop
-            // to make sure its run after the registration completes (see https://github.com/netty/netty/issues/2144).
-            EventLoop peerEventLoop = peer.eventLoop();
-            final boolean peerIsActive = peer.isActive();
-            if (peerEventLoop.inEventLoop() && !registerInProgress) {
-                peer.tryClose(peerIsActive);
-            } else {
-                try {
-                    peerEventLoop.execute(new Runnable() {
-                        @Override
-                        public void run() {
-                            peer.tryClose(peerIsActive);
+            try {
+                // Need to execute the close in the correct EventLoop (see https://github.com/netty/netty/issues/1777).
+                // Also check if the registration was not done yet. In this case we submit the close to the EventLoop
+                // to make sure its run after the registration completes
+                // (see https://github.com/netty/netty/issues/2144).
+                EventLoop peerEventLoop = peer.eventLoop();
+                final boolean peerIsActive = peer.isActive();
+                if (peerEventLoop.inEventLoop() && !registerInProgress) {
+                    peer.tryClose(peerIsActive);
+                } else {
+                    try {
+                        peerEventLoop.execute(new Runnable() {
+                            @Override
+                            public void run() {
+                                peer.tryClose(peerIsActive);
+                            }
+                        });
+                    } catch (Throwable cause) {
+                        logger.warn("Releasing Inbound Queues for channels {}-{} because exception occurred!",
+                                this, peer, cause);
+                        if (peerEventLoop.inEventLoop()) {
+                            peer.releaseInboundBuffers();
+                        } else {
+                            // inboundBuffers is a SPSC so we may leak if the event loop is shutdown prematurely or
+                            // rejects the close Runnable but give a best effort.
+                            peer.close();
                         }
-                    });
-                } catch (Throwable cause) {
-                    logger.warn("Releasing Inbound Queues for channels {}-{} because exception occurred!",
-                            this, peer, cause);
-                    releaseInboundBuffers();
-                    if (peerEventLoop.inEventLoop()) {
-                        peer.releaseInboundBuffers();
-                    } else {
-                        // inboundBuffers is a SPSC so we may leak if the event loop is shutdown prematurely or rejects
-                        // the close Runnable but give a best effort.
-                        peer.close();
+                        PlatformDependent.throwException(cause);
                     }
-                    PlatformDependent.throwException(cause);
                 }
+            } finally {
+                // We need to release all the buffers that may be put into our inbound queue since we closed the Channel
+                // to ensure we not leak any memory. This is fine as it basically gives the same guarantees as TCP which
+                // means even if the promise was notified before its not really guaranteed that the "remote peer" will
+                // see the buffer at all.
+                releaseInboundBuffers();
             }
         }
     }
