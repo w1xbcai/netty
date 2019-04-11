@@ -15,7 +15,6 @@
  */
 package io.netty.handler.ssl;
 
-import io.netty.handler.ssl.ReferenceCountedOpenSslServerContext.ServerContext;
 import io.netty.internal.tcnative.SSL;
 
 import java.io.File;
@@ -37,7 +36,6 @@ import static io.netty.handler.ssl.ReferenceCountedOpenSslServerContext.newSessi
  */
 public final class OpenSslServerContext extends OpenSslContext {
     private final OpenSslServerSessionContext sessionContext;
-    private final OpenSslKeyMaterialManager keyMaterialManager;
 
     /**
      * Creates a new instance.
@@ -346,13 +344,13 @@ public final class OpenSslServerContext extends OpenSslContext {
             boolean enableOcsp) throws SSLException {
         super(ciphers, cipherFilter, apn, sessionCacheSize, sessionTimeout, SSL.SSL_MODE_SERVER, keyCertChain,
                 clientAuth, protocols, startTls, enableOcsp);
+
         // Create a new SSL_CTX and configure it.
         boolean success = false;
         try {
-            ServerContext context = newSessionContext(this, ctx, engineMap, trustCertCollection, trustManagerFactory,
-                                                      keyCertChain, key, keyPassword, keyManagerFactory);
-            sessionContext = context.sessionContext;
-            keyMaterialManager = context.keyMaterialManager;
+            OpenSslKeyMaterialProvider.validateKeyMaterialSupported(keyCertChain, key, keyPassword);
+            sessionContext = newSessionContext(this, ctx, engineMap, trustCertCollection, trustManagerFactory,
+                                               keyCertChain, key, keyPassword, keyManagerFactory);
             success = true;
         } finally {
             if (!success) {
@@ -364,10 +362,5 @@ public final class OpenSslServerContext extends OpenSslContext {
     @Override
     public OpenSslServerSessionContext sessionContext() {
         return sessionContext;
-    }
-
-    @Override
-    OpenSslKeyMaterialManager keyMaterialManager() {
-        return keyMaterialManager;
     }
 }

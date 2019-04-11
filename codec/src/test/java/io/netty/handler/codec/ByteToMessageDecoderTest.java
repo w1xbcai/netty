@@ -16,7 +16,10 @@
 package io.netty.handler.codec;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.buffer.UnpooledByteBufAllocator;
+import io.netty.buffer.UnpooledHeapByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
@@ -87,17 +90,7 @@ public class ByteToMessageDecoderTest {
     @Test
     public void testInternalBufferClearReadAll() {
         final ByteBuf buf = Unpooled.buffer().writeBytes(new byte[] {'a'});
-        EmbeddedChannel channel = new EmbeddedChannel(new ByteToMessageDecoder() {
-            @Override
-            protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
-                ByteBuf byteBuf = internalBuffer();
-                assertEquals(1, byteBuf.refCnt());
-                in.readByte();
-                // Removal from pipeline should clear internal buffer
-                ctx.pipeline().remove(this);
-                assertEquals(0, byteBuf.refCnt());
-            }
-        });
+        EmbeddedChannel channel = newInternalBufferTestChannel();
         assertFalse(channel.writeInbound(buf));
         assertFalse(channel.finish());
     }
@@ -109,17 +102,7 @@ public class ByteToMessageDecoderTest {
     @Test
     public void testInternalBufferClearReadPartly() {
         final ByteBuf buf = Unpooled.buffer().writeBytes(new byte[] {'a', 'b'});
-        EmbeddedChannel channel = new EmbeddedChannel(new ByteToMessageDecoder() {
-            @Override
-            protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
-                ByteBuf byteBuf = internalBuffer();
-                assertEquals(1, byteBuf.refCnt());
-                in.readByte();
-                // Removal from pipeline should clear internal buffer
-                ctx.pipeline().remove(this);
-                assertEquals(0, byteBuf.refCnt());
-            }
-        });
+        EmbeddedChannel channel = newInternalBufferTestChannel();
         assertTrue(channel.writeInbound(buf));
         assertTrue(channel.finish());
         ByteBuf expected = Unpooled.wrappedBuffer(new byte[] {'b'});
@@ -128,6 +111,50 @@ public class ByteToMessageDecoderTest {
         assertNull(channel.readInbound());
         expected.release();
         b.release();
+    }
+
+    private EmbeddedChannel newInternalBufferTestChannel() {
+        return new EmbeddedChannel(new ByteToMessageDecoder() {
+            @Override
+            protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
+                ByteBuf byteBuf = internalBuffer();
+                assertEquals(1, byteBuf.refCnt());
+                in.readByte();
+                // Removal from pipeline should clear internal buffer
+                ctx.pipeline().remove(this);
+            }
+
+            @Override
+            protected void handlerRemoved0(ChannelHandlerContext ctx) throws Exception {
+                assertCumulationReleased(internalBuffer());
+            }
+        });
+    }
+
+    @Test
+    public void handlerRemovedWillNotReleaseBufferIfDecodeInProgress() {
+        EmbeddedChannel channel = new EmbeddedChannel(new ByteToMessageDecoder() {
+            @Override
+            protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
+                ctx.pipeline().remove(this);
+                assertTrue(in.refCnt() != 0);
+            }
+
+            @Override
+            protected void handlerRemoved0(ChannelHandlerContext ctx) throws Exception {
+                assertCumulationReleased(internalBuffer());
+            }
+        });
+        byte[] bytes = new byte[1024];
+        PlatformDependent.threadLocalRandom().nextBytes(bytes);
+
+        assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(bytes)));
+        assertTrue(channel.finishAndReleaseAll());
+    }
+
+    private static void assertCumulationReleased(ByteBuf byteBuf) {
+        assertTrue("unexpected value: " + byteBuf,
+                byteBuf == null || byteBuf == Unpooled.EMPTY_BUFFER || byteBuf.refCnt() == 0);
     }
 
     @Test
@@ -277,5 +304,45 @@ public class ByteToMessageDecoderTest {
         assertFalse(channel.writeInbound(Unpooled.buffer(8).writeByte(1).asReadOnly()));
         assertFalse(channel.writeInbound(Unpooled.wrappedBuffer(new byte[] { (byte) 2 })));
         assertFalse(channel.finish());
+    }
+
+    @Test
+    public void releaseWhenMergeCumulateThrows() {
+        final Error error = new Error();
+
+        ByteBuf cumulation = new UnpooledHeapByteBuf(UnpooledByteBufAllocator.DEFAULT, 0, 64) {
+            @Override
+            public ByteBuf writeBytes(ByteBuf src) {
+                throw error;
+            }
+        };
+        ByteBuf in = Unpooled.buffer().writeZero(12);
+        try {
+            ByteToMessageDecoder.MERGE_CUMULATOR.cumulate(UnpooledByteBufAllocator.DEFAULT, cumulation, in);
+            fail();
+        } catch (Error expected) {
+            assertSame(error, expected);
+            assertEquals(0, in.refCnt());
+        }
+    }
+
+    @Test
+    public void releaseWhenCompositeCumulateThrows() {
+        final Error error = new Error();
+
+        ByteBuf cumulation = new CompositeByteBuf(UnpooledByteBufAllocator.DEFAULT, false, 64) {
+            @Override
+            public CompositeByteBuf addComponent(boolean increaseWriterIndex, ByteBuf buffer) {
+                throw error;
+            }
+        };
+        ByteBuf in = Unpooled.buffer().writeZero(12);
+        try {
+            ByteToMessageDecoder.COMPOSITE_CUMULATOR.cumulate(UnpooledByteBufAllocator.DEFAULT, cumulation, in);
+            fail();
+        } catch (Error expected) {
+            assertSame(error, expected);
+            assertEquals(0, in.refCnt());
+        }
     }
 }

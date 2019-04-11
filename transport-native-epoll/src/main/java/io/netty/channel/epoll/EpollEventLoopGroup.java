@@ -33,6 +33,10 @@ import java.util.concurrent.ThreadFactory;
  * it only works on linux.
  */
 public final class EpollEventLoopGroup extends MultithreadEventLoopGroup {
+    {
+        // Ensure JNI is initialized by the time this class is loaded.
+        Epoll.ensureAvailability();
+    }
 
     /**
      * Create a new instance using the default number of threads and the default {@link ThreadFactory}.
@@ -98,25 +102,21 @@ public final class EpollEventLoopGroup extends MultithreadEventLoopGroup {
     public EpollEventLoopGroup(int nThreads, ThreadFactory threadFactory, int maxEventsAtOnce,
                                SelectStrategyFactory selectStrategyFactory) {
         super(nThreads, threadFactory, maxEventsAtOnce, selectStrategyFactory, RejectedExecutionHandlers.reject());
-        Epoll.ensureAvailability();
     }
 
     public EpollEventLoopGroup(int nThreads, Executor executor, SelectStrategyFactory selectStrategyFactory) {
         super(nThreads, executor, 0, selectStrategyFactory, RejectedExecutionHandlers.reject());
-        Epoll.ensureAvailability();
     }
 
     public EpollEventLoopGroup(int nThreads, Executor executor, EventExecutorChooserFactory chooserFactory,
                                SelectStrategyFactory selectStrategyFactory) {
         super(nThreads, executor, chooserFactory, 0, selectStrategyFactory, RejectedExecutionHandlers.reject());
-        Epoll.ensureAvailability();
     }
 
     public EpollEventLoopGroup(int nThreads, Executor executor, EventExecutorChooserFactory chooserFactory,
                                SelectStrategyFactory selectStrategyFactory,
                                RejectedExecutionHandler rejectedExecutionHandler) {
         super(nThreads, executor, chooserFactory, 0, selectStrategyFactory, rejectedExecutionHandler);
-        Epoll.ensureAvailability();
     }
 
     /**

@@ -132,6 +132,13 @@ public class WebSocketServerProtocolHandler extends WebSocketProtocolHandler {
 
     public WebSocketServerProtocolHandler(String websocketPath, String subprotocols,
             boolean allowExtensions, int maxFrameSize, boolean allowMaskMismatch, boolean checkStartsWith) {
+        this(websocketPath, subprotocols, allowExtensions, maxFrameSize, allowMaskMismatch, checkStartsWith, true);
+    }
+
+    public WebSocketServerProtocolHandler(String websocketPath, String subprotocols,
+                                          boolean allowExtensions, int maxFrameSize, boolean allowMaskMismatch,
+                                          boolean checkStartsWith, boolean dropPongFrames) {
+        super(dropPongFrames);
         this.websocketPath = websocketPath;
         this.subprotocols = subprotocols;
         this.allowExtensions = allowExtensions;
@@ -178,6 +185,7 @@ public class WebSocketServerProtocolHandler extends WebSocketProtocolHandler {
                     HTTP_1_1, HttpResponseStatus.BAD_REQUEST, Unpooled.wrappedBuffer(cause.getMessage().getBytes()));
             ctx.channel().writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
         } else {
+            ctx.fireExceptionCaught(cause);
             ctx.close();
         }
     }

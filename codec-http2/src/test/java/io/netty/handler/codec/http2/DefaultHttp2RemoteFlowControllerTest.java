@@ -33,6 +33,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static io.netty.handler.codec.http2.Http2CodecUtil.CONNECTION_STREAM_ID;
 import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_PRIORITY_WEIGHT;
 import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_WINDOW_SIZE;
+import static io.netty.handler.codec.http2.Http2CodecUtil.MAX_WEIGHT;
+import static io.netty.handler.codec.http2.Http2CodecUtil.MIN_WEIGHT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -255,8 +257,8 @@ public abstract class DefaultHttp2RemoteFlowControllerTest {
         moreData.assertNotWritten();
 
         connection.stream(STREAM_A).close();
-        data.assertError();
-        moreData.assertError();
+        data.assertError(Http2Error.STREAM_CLOSED);
+        moreData.assertError(Http2Error.STREAM_CLOSED);
         verifyZeroInteractions(listener);
     }
 
@@ -906,6 +908,36 @@ public abstract class DefaultHttp2RemoteFlowControllerTest {
         dataA.assertFullyWritten();
     }
 
+    @Test(expected = AssertionError.class)
+    public void invalidParentStreamIdThrows() {
+        controller.updateDependencyTree(STREAM_D, -1, DEFAULT_PRIORITY_WEIGHT, true);
+    }
+
+    @Test(expected = AssertionError.class)
+    public void invalidChildStreamIdThrows() {
+        controller.updateDependencyTree(-1, STREAM_D, DEFAULT_PRIORITY_WEIGHT, true);
+    }
+
+    @Test(expected = AssertionError.class)
+    public void connectionChildStreamIdThrows() {
+        controller.updateDependencyTree(0, STREAM_D, DEFAULT_PRIORITY_WEIGHT, true);
+    }
+
+    @Test(expected = AssertionError.class)
+    public void invalidWeightTooSmallThrows() {
+        controller.updateDependencyTree(STREAM_A, STREAM_D, (short) (MIN_WEIGHT - 1), true);
+    }
+
+    @Test(expected = AssertionError.class)
+    public void invalidWeightTooBigThrows() {
+        controller.updateDependencyTree(STREAM_A, STREAM_D, (short) (MAX_WEIGHT + 1), true);
+    }
+
+    @Test(expected = AssertionError.class)
+    public void dependencyOnSelfThrows() {
+        controller.updateDependencyTree(STREAM_A, STREAM_A, DEFAULT_PRIORITY_WEIGHT, true);
+    }
+
     private void assertWritabilityChanged(int amt, boolean writable) {
         verify(listener, times(amt)).writabilityChanged(stream(STREAM_A));
         verify(listener, times(amt)).writabilityChanged(stream(STREAM_B));
@@ -1074,8 +1106,11 @@ public abstract class DefaultHttp2RemoteFlowControllerTest {
             return merged;
         }
 
-        public void assertError() {
+        public void assertError(Http2Error error) {
             assertNotNull(t);
+            if (error != null) {
+                assertSame(error, ((Http2Exception) t).error());
+            }
         }
     }
 }

@@ -16,33 +16,15 @@
 
 package io.netty.handler.ssl;
 
-import static org.hamcrest.CoreMatchers.is;
-import static org.hamcrest.CoreMatchers.nullValue;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThat;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
-import static org.junit.Assume.assumeTrue;
-
-import java.io.File;
-import java.net.InetSocketAddress;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-
-import javax.net.ssl.SSLEngine;
-import javax.xml.bind.DatatypeConverter;
-
-import org.junit.Test;
-
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
+import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.DefaultEventLoopGroup;
@@ -62,10 +44,28 @@ import io.netty.util.DomainNameMappingBuilder;
 import io.netty.util.Mapping;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ReferenceCounted;
+import io.netty.util.internal.ResourcesUtil;
 import io.netty.util.concurrent.Promise;
 import io.netty.util.internal.ObjectUtil;
+import io.netty.util.internal.StringUtil;
+import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
+
+import java.io.File;
+import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
+import javax.net.ssl.SSLEngine;
+
+import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.nullValue;
+import static org.junit.Assert.*;
+import static org.junit.Assume.assumeTrue;
 
 @RunWith(Parameterized.class)
 public class SniHandlerTest {
@@ -99,8 +99,8 @@ public class SniHandlerTest {
             assumeApnSupported(provider);
         }
 
-        File keyFile = new File(SniHandlerTest.class.getResource("test_encrypted.pem").getFile());
-        File crtFile = new File(SniHandlerTest.class.getResource("test.crt").getFile());
+        File keyFile = ResourcesUtil.getFile(SniHandlerTest.class, "test_encrypted.pem");
+        File crtFile = ResourcesUtil.getFile(SniHandlerTest.class, "test.crt");
 
         SslContextBuilder sslCtxBuilder = SslContextBuilder.forServer(crtFile, keyFile, "12345")
                 .sslProvider(provider);
@@ -115,7 +115,7 @@ public class SniHandlerTest {
             assumeApnSupported(provider);
         }
 
-        File crtFile = new File(SniHandlerTest.class.getResource("test.crt").getFile());
+        File crtFile = ResourcesUtil.getFile(SniHandlerTest.class, "test.crt");
 
         SslContextBuilder sslCtxBuilder = SslContextBuilder.forClient().trustManager(crtFile).sslProvider(provider);
         if (apn) {
@@ -125,7 +125,7 @@ public class SniHandlerTest {
     }
 
     @Parameterized.Parameters(name = "{index}: sslProvider={0}")
-    public static Iterable<? extends Object> data() {
+    public static Iterable<?> data() {
         List<SslProvider> params = new ArrayList<SslProvider>(3);
         if (OpenSsl.isAvailable()) {
             params.add(SslProvider.OPENSSL);
@@ -139,6 +139,42 @@ public class SniHandlerTest {
 
     public SniHandlerTest(SslProvider provider) {
         this.provider = provider;
+    }
+
+    @Test
+    public void testNonSslRecord() throws Exception {
+        SslContext nettyContext = makeSslContext(provider, false);
+        try {
+            final AtomicReference<SslHandshakeCompletionEvent> evtRef =
+                    new AtomicReference<SslHandshakeCompletionEvent>();
+            SniHandler handler = new SniHandler(new DomainNameMappingBuilder<SslContext>(nettyContext).build());
+            EmbeddedChannel ch = new EmbeddedChannel(handler, new ChannelInboundHandlerAdapter() {
+                @Override
+                public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+                    if (evt instanceof SslHandshakeCompletionEvent) {
+                        assertTrue(evtRef.compareAndSet(null, (SslHandshakeCompletionEvent) evt));
+                    }
+                }
+            });
+
+            try {
+                byte[] bytes = new byte[1024];
+                bytes[0] = SslUtils.SSL_CONTENT_TYPE_ALERT;
+
+                try {
+                    ch.writeInbound(Unpooled.wrappedBuffer(bytes));
+                    fail();
+                } catch (DecoderException e) {
+                    assertTrue(e.getCause() instanceof NotSslRecordException);
+                }
+                assertFalse(ch.finish());
+            } finally {
+                ch.finishAndReleaseAll();
+            }
+            assertTrue(evtRef.get().cause() instanceof NotSslRecordException);
+        } finally {
+            releaseAll(nettyContext);
+        }
     }
 
     @Test
@@ -157,41 +193,90 @@ public class SniHandlerTest {
                     .add("chat4.leancloud.cn", leanContext2)
                     .build();
 
+            final AtomicReference<SniCompletionEvent> evtRef = new AtomicReference<SniCompletionEvent>();
+            SniHandler handler = new SniHandler(mapping);
+            EmbeddedChannel ch = new EmbeddedChannel(handler, new ChannelInboundHandlerAdapter() {
+                @Override
+                public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+                    if (evt instanceof SniCompletionEvent) {
+                        assertTrue(evtRef.compareAndSet(null, (SniCompletionEvent) evt));
+                    } else {
+                        ctx.fireUserEventTriggered(evt);
+                    }
+                }
+            });
+
+            try {
+                // hex dump of a client hello packet, which contains hostname "CHAT4.LEANCLOUD.CN"
+                String tlsHandshakeMessageHex1 = "16030100";
+                // part 2
+                String tlsHandshakeMessageHex = "c6010000c20303bb0855d66532c05a0ef784f7c384feeafa68b3" +
+                        "b655ac7288650d5eed4aa3fb52000038c02cc030009fcca9cca8ccaac02b" +
+                        "c02f009ec024c028006bc023c0270067c00ac0140039c009c0130033009d" +
+                        "009c003d003c0035002f00ff010000610000001700150000124348415434" +
+                        "2e4c45414e434c4f55442e434e000b000403000102000a000a0008001d00" +
+                        "170019001800230000000d0020001e060106020603050105020503040104" +
+                        "0204030301030203030201020202030016000000170000";
+
+                ch.writeInbound(Unpooled.wrappedBuffer(StringUtil.decodeHexDump(tlsHandshakeMessageHex1)));
+                ch.writeInbound(Unpooled.wrappedBuffer(StringUtil.decodeHexDump(tlsHandshakeMessageHex)));
+
+                // This should produce an alert
+                assertTrue(ch.finish());
+
+                assertThat(handler.hostname(), is("chat4.leancloud.cn"));
+                assertThat(handler.sslContext(), is(leanContext));
+
+                SniCompletionEvent evt = evtRef.get();
+                assertNotNull(evt);
+                assertEquals("chat4.leancloud.cn", evt.hostname());
+                assertTrue(evt.isSuccess());
+                assertNull(evt.cause());
+            } finally {
+                ch.finishAndReleaseAll();
+            }
+        } finally {
+            releaseAll(leanContext, leanContext2, nettyContext);
+        }
+    }
+
+    @Test(expected = DecoderException.class)
+    public void testNonAsciiServerNameParsing() throws Exception {
+        SslContext nettyContext = makeSslContext(provider, false);
+        SslContext leanContext = makeSslContext(provider, false);
+        SslContext leanContext2 = makeSslContext(provider, false);
+
+        try {
+            DomainNameMapping<SslContext> mapping = new DomainNameMappingBuilder<SslContext>(nettyContext)
+                    .add("*.netty.io", nettyContext)
+                    // input with custom cases
+                    .add("*.LEANCLOUD.CN", leanContext)
+                    // a hostname conflict with previous one, since we are using order-sensitive config,
+                    // the engine won't be used with the handler.
+                    .add("chat4.leancloud.cn", leanContext2)
+                    .build();
+
             SniHandler handler = new SniHandler(mapping);
             EmbeddedChannel ch = new EmbeddedChannel(handler);
 
-            // hex dump of a client hello packet, which contains hostname "CHAT4。LEANCLOUD。CN"
-            String tlsHandshakeMessageHex1 = "16030100";
-            // part 2
-            String tlsHandshakeMessageHex = "bd010000b90303a74225676d1814ba57faff3b366" +
-                    "3656ed05ee9dbb2a4dbb1bb1c32d2ea5fc39e0000000100008c0000001700150000164348" +
-                    "415434E380824C45414E434C4F5544E38082434E000b000403000102000a00340032000e0" +
-                    "00d0019000b000c00180009000a0016001700080006000700140015000400050012001300" +
-                    "0100020003000f0010001100230000000d0020001e0601060206030501050205030401040" +
-                    "20403030103020303020102020203000f00010133740000";
-
             try {
+                // hex dump of a client hello packet, which contains an invalid hostname "CHAT4。LEANCLOUD。CN"
+                String tlsHandshakeMessageHex1 = "16030100";
+                // part 2
+                String tlsHandshakeMessageHex = "bd010000b90303a74225676d1814ba57faff3b366" +
+                        "3656ed05ee9dbb2a4dbb1bb1c32d2ea5fc39e0000000100008c0000001700150000164348" +
+                        "415434E380824C45414E434C4F5544E38082434E000b000403000102000a00340032000e0" +
+                        "00d0019000b000c00180009000a0016001700080006000700140015000400050012001300" +
+                        "0100020003000f0010001100230000000d0020001e0601060206030501050205030401040" +
+                        "20403030103020303020102020203000f00010133740000";
+
                 // Push the handshake message.
-                // Decode should fail because SNI error
-                ch.writeInbound(Unpooled.wrappedBuffer(DatatypeConverter.parseHexBinary(tlsHandshakeMessageHex1)));
-                ch.writeInbound(Unpooled.wrappedBuffer(DatatypeConverter.parseHexBinary(tlsHandshakeMessageHex)));
-                fail();
-            } catch (DecoderException e) {
-                // expected
-            }
-
-            // This should produce an alert
-            assertTrue(ch.finish());
-
-            assertThat(handler.hostname(), is("chat4.leancloud.cn"));
-            assertThat(handler.sslContext(), is(leanContext));
-
-            for (;;) {
-                Object msg = ch.readOutbound();
-                if (msg == null) {
-                    break;
-                }
-                ReferenceCountUtil.release(msg);
+                // Decode should fail because of the badly encoded "HostName" string in the SNI extension
+                // that isn't ASCII as per RFC 6066 - https://tools.ietf.org/html/rfc6066#page-6
+                ch.writeInbound(Unpooled.wrappedBuffer(StringUtil.decodeHexDump(tlsHandshakeMessageHex1)));
+                ch.writeInbound(Unpooled.wrappedBuffer(StringUtil.decodeHexDump(tlsHandshakeMessageHex)));
+            } finally {
+                ch.finishAndReleaseAll();
             }
         } finally {
             releaseAll(leanContext, leanContext2, nettyContext);
@@ -219,12 +304,25 @@ public class SniHandlerTest {
 
             // invalid
             byte[] message = {22, 3, 1, 0, 0};
-
             try {
                 // Push the handshake message.
                 ch.writeInbound(Unpooled.wrappedBuffer(message));
+                // TODO(scott): This should fail becasue the engine should reject zero length records during handshake.
+                // See https://github.com/netty/netty/issues/6348.
+                // fail();
             } catch (Exception e) {
                 // expected
+            }
+
+            ch.close();
+
+            // When the channel is closed the SslHandler will write an empty buffer to the channel.
+            ByteBuf buf = ch.readOutbound();
+            // TODO(scott): if the engine is shutdown correctly then this buffer shouldn't be null!
+            // See https://github.com/netty/netty/issues/6348.
+            if (buf != null) {
+                assertFalse(buf.isReadable());
+                buf.release();
             }
 
             assertThat(ch.finish(), is(false));
@@ -444,7 +542,7 @@ public class SniHandlerTest {
     private static class CustomSslHandler extends SslHandler {
         private final SslContext sslContext;
 
-        public CustomSslHandler(SslContext sslContext, SSLEngine sslEngine) {
+        CustomSslHandler(SslContext sslContext, SSLEngine sslEngine) {
             super(sslEngine);
             this.sslContext = ObjectUtil.checkNotNull(sslContext, "sslContext");
         }

@@ -25,6 +25,7 @@ import io.netty.util.internal.PriorityQueueNode;
 import io.netty.util.internal.SystemPropertyUtil;
 import io.netty.util.internal.UnstableApi;
 
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Iterator;
@@ -33,11 +34,11 @@ import java.util.List;
 import static io.netty.handler.codec.http2.Http2CodecUtil.CONNECTION_STREAM_ID;
 import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_MIN_ALLOCATION_CHUNK;
 import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_PRIORITY_WEIGHT;
-import static io.netty.handler.codec.http2.Http2CodecUtil.MAX_WEIGHT;
-import static io.netty.handler.codec.http2.Http2CodecUtil.MIN_WEIGHT;
 import static io.netty.handler.codec.http2.Http2CodecUtil.streamableBytes;
 import static io.netty.handler.codec.http2.Http2Error.INTERNAL_ERROR;
 import static io.netty.handler.codec.http2.Http2Exception.connectionError;
+import static io.netty.util.internal.ObjectUtil.checkPositive;
+import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
 import static java.lang.Integer.MAX_VALUE;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
@@ -97,9 +98,8 @@ public final class WeightedFairQueueByteDistributor implements StreamByteDistrib
     }
 
     public WeightedFairQueueByteDistributor(Http2Connection connection, int maxStateOnlySize) {
-        if (maxStateOnlySize < 0) {
-            throw new IllegalArgumentException("maxStateOnlySize: " + maxStateOnlySize + " (expected: >0)");
-        } else if (maxStateOnlySize == 0) {
+        checkPositiveOrZero(maxStateOnlySize, "maxStateOnlySize");
+        if (maxStateOnlySize == 0) {
             stateOnlyMap = IntCollections.emptyMap();
             stateOnlyRemovalQueue = EmptyPriorityQueue.instance();
         } else {
@@ -197,14 +197,6 @@ public final class WeightedFairQueueByteDistributor implements StreamByteDistrib
 
     @Override
     public void updateDependencyTree(int childStreamId, int parentStreamId, short weight, boolean exclusive) {
-        if (weight < MIN_WEIGHT || weight > MAX_WEIGHT) {
-            throw new IllegalArgumentException(String.format(
-                    "Invalid weight: %d. Must be between %d and %d (inclusive).", weight, MIN_WEIGHT, MAX_WEIGHT));
-        }
-        if (childStreamId == parentStreamId) {
-            throw new IllegalArgumentException("A stream cannot depend on itself");
-        }
-
         State state = state(childStreamId);
         if (state == null) {
             // If there is no State object that means there is no Http2Stream object and we would have to keep the
@@ -229,6 +221,10 @@ public final class WeightedFairQueueByteDistributor implements StreamByteDistrib
             newParent = new State(parentStreamId);
             stateOnlyRemovalQueue.add(newParent);
             stateOnlyMap.put(parentStreamId, newParent);
+            // Only the stream which was just added will change parents. So we only need an array of size 1.
+            List<ParentChangedEvent> events = new ArrayList<ParentChangedEvent>(1);
+            connectionState.takeChild(newParent, false, events);
+            notifyParentChanged(events);
         }
 
         // if activeCountForTree == 0 then it will not be in its parent's pseudoTimeQueue and thus should not be counted
@@ -286,9 +282,7 @@ public final class WeightedFairQueueByteDistributor implements StreamByteDistrib
      * @param allocationQuantum the amount of bytes that will be allocated to each stream. Must be &gt; 0.
      */
     public void allocationQuantum(int allocationQuantum) {
-        if (allocationQuantum <= 0) {
-            throw new IllegalArgumentException("allocationQuantum must be > 0");
-        }
+        checkPositive(allocationQuantum, "allocationQuantum");
         this.allocationQuantum = allocationQuantum;
     }
 
@@ -360,13 +354,6 @@ public final class WeightedFairQueueByteDistributor implements StreamByteDistrib
     /**
      * For testing only!
      */
-    int streamableBytes0(Http2Stream stream) {
-        return state(stream).streamableBytes;
-    }
-
-    /**
-     * For testing only!
-     */
     boolean isChild(int childId, int parentId, short weight) {
         State parent = state(parentId);
         State child;
@@ -405,7 +392,9 @@ public final class WeightedFairQueueByteDistributor implements StreamByteDistrib
      *     <li>Stream ID (higher stream ID is higher priority - used for tie breaker)</li>
      * </ul>
      */
-    private static final class StateOnlyComparator implements Comparator<State> {
+    private static final class StateOnlyComparator implements Comparator<State>, Serializable {
+        private static final long serialVersionUID = -4806936913002105966L;
+
         static final StateOnlyComparator INSTANCE = new StateOnlyComparator();
 
         private StateOnlyComparator() {
@@ -432,7 +421,9 @@ public final class WeightedFairQueueByteDistributor implements StreamByteDistrib
         }
     }
 
-    private static final class StatePseudoTimeComparator implements Comparator<State> {
+    private static final class StatePseudoTimeComparator implements Comparator<State>, Serializable {
+        private static final long serialVersionUID = -1437548640227161828L;
+
         static final StatePseudoTimeComparator INSTANCE = new StatePseudoTimeComparator();
 
         private StatePseudoTimeComparator() {
@@ -770,7 +761,7 @@ public final class WeightedFairQueueByteDistributor implements StreamByteDistrib
                     .append(" flags ").append(flags)
                     .append(" pseudoTimeQueue.size() ").append(pseudoTimeQueue.size())
                     .append(" stateOnlyQueueIndex ").append(stateOnlyQueueIndex)
-                    .append(" parent ").append(parent).append("} [");
+                    .append(" parent.streamId ").append(parent == null ? -1 : parent.streamId).append("} [");
 
             if (!pseudoTimeQueue.isEmpty()) {
                 for (State s : pseudoTimeQueue) {

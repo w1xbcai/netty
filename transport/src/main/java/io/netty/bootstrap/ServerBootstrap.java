@@ -160,10 +160,10 @@ public class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, ServerCh
         final Entry<ChannelOption<?>, Object>[] currentChildOptions;
         final Entry<AttributeKey<?>, Object>[] currentChildAttrs;
         synchronized (childOptions) {
-            currentChildOptions = childOptions.entrySet().toArray(newOptionArray(childOptions.size()));
+            currentChildOptions = childOptions.entrySet().toArray(newOptionArray(0));
         }
         synchronized (childAttrs) {
-            currentChildAttrs = childAttrs.entrySet().toArray(newAttrArray(childAttrs.size()));
+            currentChildAttrs = childAttrs.entrySet().toArray(newAttrArray(0));
         }
 
         p.addLast(new ChannelInitializer<Channel>() {
@@ -175,10 +175,6 @@ public class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, ServerCh
                     pipeline.addLast(handler);
                 }
 
-                // We add this handler via the EventLoop as the user may have used a ChannelInitializer as handler.
-                // In this case the initChannel(...) method will only be called after this method returns. Because
-                // of this we need to ensure we add our handler in a delayed fashion so all the users handler are
-                // placed in front of the ServerBootstrapAcceptor.
                 ch.eventLoop().execute(new Runnable() {
                     @Override
                     public void run() {
@@ -271,7 +267,7 @@ public class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, ServerCh
 
         private static void forceClose(Channel child, Throwable t) {
             child.unsafe().closeForcibly();
-            logger.warn("Failed to register an accepted channel: " + child, t);
+            logger.warn("Failed to register an accepted channel: {}", child, t);
         }
 
         @Override

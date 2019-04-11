@@ -25,6 +25,7 @@ import io.netty.resolver.ResolvedAddressTypes;
 import io.netty.util.internal.UnstableApi;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import static io.netty.resolver.dns.DnsServerAddressStreamProviders.platformDefault;
@@ -36,10 +37,11 @@ import static io.netty.util.internal.ObjectUtil.intValue;
  */
 @UnstableApi
 public final class DnsNameResolverBuilder {
-    private final EventLoop eventLoop;
+    private EventLoop eventLoop;
     private ChannelFactory<? extends DatagramChannel> channelFactory;
     private DnsCache resolveCache;
-    private DnsCache authoritativeDnsServerCache;
+    private DnsCnameCache cnameCache;
+    private AuthoritativeDnsServerCache authoritativeDnsServerCache;
     private Integer minTtl;
     private Integer maxTtl;
     private Integer negativeTtl;
@@ -52,18 +54,41 @@ public final class DnsNameResolverBuilder {
     private boolean optResourceEnabled = true;
     private HostsFileEntriesResolver hostsFileEntriesResolver = HostsFileEntriesResolver.DEFAULT;
     private DnsServerAddressStreamProvider dnsServerAddressStreamProvider = platformDefault();
-    private String[] searchDomains = DnsNameResolver.DEFAULT_SEARCH_DOMAINS;
-    private int ndots = 1;
+    private DnsQueryLifecycleObserverFactory dnsQueryLifecycleObserverFactory =
+            NoopDnsQueryLifecycleObserverFactory.INSTANCE;
+    private String[] searchDomains;
+    private int ndots = -1;
     private boolean decodeIdn = true;
 
     /**
      * Creates a new builder.
+     */
+    public DnsNameResolverBuilder() {
+    }
+
+    /**
+     * Creates a new builder.
      *
-     * @param eventLoop the {@link EventLoop} the {@link EventLoop} which will perform the communication with the DNS
+     * @param eventLoop the {@link EventLoop} which will perform the communication with the DNS
      * servers.
      */
     public DnsNameResolverBuilder(EventLoop eventLoop) {
+        eventLoop(eventLoop);
+    }
+
+    /**
+     * Sets the {@link EventLoop} which will perform the communication with the DNS servers.
+     *
+     * @param eventLoop the {@link EventLoop}
+     * @return {@code this}
+     */
+    public DnsNameResolverBuilder eventLoop(EventLoop eventLoop) {
         this.eventLoop = eventLoop;
+        return this;
+    }
+
+    protected ChannelFactory<? extends DatagramChannel> channelFactory() {
+        return this.channelFactory;
     }
 
     /**
@@ -100,12 +125,47 @@ public final class DnsNameResolverBuilder {
     }
 
     /**
+     * Sets the cache for {@code CNAME} mappings.
+     *
+     * @param cnameCache the cache used to cache {@code CNAME} mappings for a domain.
+     * @return {@code this}
+     */
+    public DnsNameResolverBuilder cnameCache(DnsCnameCache cnameCache) {
+        this.cnameCache  = cnameCache;
+        return this;
+    }
+
+    /**
+     * Set the factory used to generate objects which can observe individual DNS queries.
+     * @param lifecycleObserverFactory the factory used to generate objects which can observe individual DNS queries.
+     * @return {@code this}
+     */
+    public DnsNameResolverBuilder dnsQueryLifecycleObserverFactory(DnsQueryLifecycleObserverFactory
+                                                                           lifecycleObserverFactory) {
+        this.dnsQueryLifecycleObserverFactory = checkNotNull(lifecycleObserverFactory, "lifecycleObserverFactory");
+        return this;
+    }
+
+    /**
+     * Sets the cache for authoritative NS servers
+     *
+     * @param authoritativeDnsServerCache the authoritative NS servers cache
+     * @return {@code this}
+     * @deprecated Use {@link #authoritativeDnsServerCache(AuthoritativeDnsServerCache)}
+     */
+    @Deprecated
+    public DnsNameResolverBuilder authoritativeDnsServerCache(DnsCache authoritativeDnsServerCache) {
+        this.authoritativeDnsServerCache = new AuthoritativeDnsServerCacheAdapter(authoritativeDnsServerCache);
+        return this;
+    }
+
+    /**
      * Sets the cache for authoritative NS servers
      *
      * @param authoritativeDnsServerCache the authoritative NS servers cache
      * @return {@code this}
      */
-    public DnsNameResolverBuilder authoritativeDnsServerCache(DnsCache authoritativeDnsServerCache) {
+    public DnsNameResolverBuilder authoritativeDnsServerCache(AuthoritativeDnsServerCache authoritativeDnsServerCache) {
         this.authoritativeDnsServerCache = authoritativeDnsServerCache;
         return this;
     }
@@ -261,6 +321,10 @@ public final class DnsNameResolverBuilder {
         return this;
     }
 
+    protected DnsServerAddressStreamProvider nameServerProvider() {
+        return this.dnsServerAddressStreamProvider;
+    }
+
     /**
      * Set the {@link DnsServerAddressStreamProvider} which is used to determine which DNS server is used to resolve
      * each hostname.
@@ -296,7 +360,7 @@ public final class DnsNameResolverBuilder {
             list.add(f);
         }
 
-        this.searchDomains = list.toArray(new String[list.size()]);
+        this.searchDomains = list.toArray(new String[0]);
         return this;
     }
 
@@ -314,6 +378,19 @@ public final class DnsNameResolverBuilder {
 
     private DnsCache newCache() {
         return new DefaultDnsCache(intValue(minTtl, 0), intValue(maxTtl, Integer.MAX_VALUE), intValue(negativeTtl, 0));
+    }
+
+    private AuthoritativeDnsServerCache newAuthoritativeDnsServerCache() {
+        return new DefaultAuthoritativeDnsServerCache(
+                intValue(minTtl, 0), intValue(maxTtl, Integer.MAX_VALUE),
+                // Let us use the sane ordering as DnsNameResolver will be used when returning
+                // nameservers from the cache.
+                new NameServerComparator(DnsNameResolver.preferredAddressType(resolvedAddressTypes).addressType()));
+    }
+
+    private DnsCnameCache newCnameCache() {
+        return new DefaultDnsCnameCache(
+                intValue(minTtl, 0), intValue(maxTtl, Integer.MAX_VALUE));
     }
 
     /**
@@ -334,6 +411,10 @@ public final class DnsNameResolverBuilder {
      * @return a {@link DnsNameResolver}
      */
     public DnsNameResolver build() {
+        if (eventLoop == null) {
+            throw new IllegalStateException("eventLoop should be specified to build a DnsNameResolver.");
+        }
+
         if (resolveCache != null && (minTtl != null || maxTtl != null || negativeTtl != null)) {
             throw new IllegalStateException("resolveCache and TTLs are mutually exclusive");
         }
@@ -343,13 +424,16 @@ public final class DnsNameResolverBuilder {
         }
 
         DnsCache resolveCache = this.resolveCache != null ? this.resolveCache : newCache();
-        DnsCache authoritativeDnsServerCache = this.authoritativeDnsServerCache != null ?
-                this.authoritativeDnsServerCache : newCache();
+        DnsCnameCache cnameCache = this.cnameCache != null ? this.cnameCache : newCnameCache();
+        AuthoritativeDnsServerCache authoritativeDnsServerCache = this.authoritativeDnsServerCache != null ?
+                this.authoritativeDnsServerCache : newAuthoritativeDnsServerCache();
         return new DnsNameResolver(
                 eventLoop,
                 channelFactory,
                 resolveCache,
+                cnameCache,
                 authoritativeDnsServerCache,
+                dnsQueryLifecycleObserverFactory,
                 queryTimeoutMillis,
                 resolvedAddressTypes,
                 recursionDesired,
@@ -362,5 +446,67 @@ public final class DnsNameResolverBuilder {
                 searchDomains,
                 ndots,
                 decodeIdn);
+    }
+
+    /**
+     * Creates a copy of this {@link DnsNameResolverBuilder}
+     *
+     * @return {@link DnsNameResolverBuilder}
+     */
+    public DnsNameResolverBuilder copy() {
+        DnsNameResolverBuilder copiedBuilder = new DnsNameResolverBuilder();
+
+        if (eventLoop != null) {
+            copiedBuilder.eventLoop(eventLoop);
+        }
+
+        if (channelFactory != null) {
+            copiedBuilder.channelFactory(channelFactory);
+        }
+
+        if (resolveCache != null) {
+            copiedBuilder.resolveCache(resolveCache);
+        }
+
+        if (cnameCache != null) {
+            copiedBuilder.cnameCache(cnameCache);
+        }
+        if (maxTtl != null && minTtl != null) {
+            copiedBuilder.ttl(minTtl, maxTtl);
+        }
+
+        if (negativeTtl != null) {
+            copiedBuilder.negativeTtl(negativeTtl);
+        }
+
+        if (authoritativeDnsServerCache != null) {
+            copiedBuilder.authoritativeDnsServerCache(authoritativeDnsServerCache);
+        }
+
+        if (dnsQueryLifecycleObserverFactory != null) {
+            copiedBuilder.dnsQueryLifecycleObserverFactory(dnsQueryLifecycleObserverFactory);
+        }
+
+        copiedBuilder.queryTimeoutMillis(queryTimeoutMillis);
+        copiedBuilder.resolvedAddressTypes(resolvedAddressTypes);
+        copiedBuilder.recursionDesired(recursionDesired);
+        copiedBuilder.maxQueriesPerResolve(maxQueriesPerResolve);
+        copiedBuilder.traceEnabled(traceEnabled);
+        copiedBuilder.maxPayloadSize(maxPayloadSize);
+        copiedBuilder.optResourceEnabled(optResourceEnabled);
+        copiedBuilder.hostsFileEntriesResolver(hostsFileEntriesResolver);
+
+        if (dnsServerAddressStreamProvider != null) {
+            copiedBuilder.nameServerProvider(dnsServerAddressStreamProvider);
+        }
+
+        if (searchDomains != null) {
+            copiedBuilder.searchDomains(Arrays.asList(searchDomains));
+        }
+
+        copiedBuilder.ndots(ndots);
+        copiedBuilder.decodeIdn(decodeIdn);
+
+        return copiedBuilder;
     }
 }

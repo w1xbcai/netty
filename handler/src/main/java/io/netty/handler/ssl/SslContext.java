@@ -53,7 +53,6 @@ import java.security.KeyStore;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
-import java.security.Security;
 import java.security.UnrecoverableKeyException;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
@@ -61,6 +60,7 @@ import java.security.cert.X509Certificate;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.List;
+import java.util.concurrent.Executor;
 
 /**
  * A secure socket protocol implementation which acts as a factory for {@link SSLEngine} and {@link SslHandler}.
@@ -85,6 +85,8 @@ import java.util.List;
  * </pre>
  */
 public abstract class SslContext {
+    static final String ALIAS = "key";
+
     static final CertificateFactory X509_CERT_FACTORY;
     static {
         try {
@@ -879,14 +881,30 @@ public abstract class SslContext {
     public abstract SSLSessionContext sessionContext();
 
     /**
+     * Create a new SslHandler.
+     * @see #newHandler(ByteBufAllocator, Executor)
+     */
+    public final SslHandler newHandler(ByteBufAllocator alloc) {
+        return newHandler(alloc, startTls);
+    }
+
+    /**
+     * Create a new SslHandler.
+     * @see #newHandler(ByteBufAllocator)
+     */
+    protected SslHandler newHandler(ByteBufAllocator alloc, boolean startTls) {
+        return new SslHandler(newEngine(alloc), startTls);
+    }
+
+    /**
      * Creates a new {@link SslHandler}.
      * <p>If {@link SslProvider#OPENSSL_REFCNT} is used then the returned {@link SslHandler} will release the engine
      * that is wrapped. If the returned {@link SslHandler} is not inserted into a pipeline then you may leak native
-     * memory!</p>
+     * memory!
      * <p><b>Beware</b>: the underlying generated {@link SSLEngine} won't have
      * <a href="https://wiki.openssl.org/index.php/Hostname_validation">hostname verification</a> enabled by default.
      * If you create {@link SslHandler} for the client side and want proper security, we advice that you configure
-     * the {@link SSLEngine} (see {@link javax.net.ssl.SSLParameters#setEndpointIdentificationAlgorithm(String)}):</p>
+     * the {@link SSLEngine} (see {@link javax.net.ssl.SSLParameters#setEndpointIdentificationAlgorithm(String)}):
      * <pre>
      * SSLEngine sslEngine = sslHandler.engine();
      * SSLParameters sslParameters = sslEngine.getSSLParameters();
@@ -894,24 +912,53 @@ public abstract class SslContext {
      * sslParameters.setEndpointIdentificationAlgorithm("HTTPS");
      * sslEngine.setSSLParameters(sslParameters);
      * </pre>
-     *
+     * <p>
+     * The underlying {@link SSLEngine} may not follow the restrictions imposed by the
+     * <a href="https://docs.oracle.com/javase/7/docs/api/javax/net/ssl/SSLEngine.html">SSLEngine javadocs</a> which
+     * limits wrap/unwrap to operate on a single SSL/TLS packet.
      * @param alloc If supported by the SSLEngine then the SSLEngine will use this to allocate ByteBuf objects.
-     *
+     * @param delegatedTaskExecutor the {@link Executor} that will be used to execute tasks that are returned by
+     *                              {@link SSLEngine#getDelegatedTask()}.
      * @return a new {@link SslHandler}
      */
-    public final SslHandler newHandler(ByteBufAllocator alloc) {
-        return new SslHandler(newEngine(alloc), startTls);
+    public SslHandler newHandler(ByteBufAllocator alloc, Executor delegatedTaskExecutor) {
+        return newHandler(alloc, startTls, delegatedTaskExecutor);
+    }
+
+    /**
+     * Create a new SslHandler.
+     * @see #newHandler(ByteBufAllocator, String, int, boolean, Executor)
+     */
+    protected SslHandler newHandler(ByteBufAllocator alloc, boolean startTls, Executor executor) {
+        return new SslHandler(newEngine(alloc), startTls, executor);
+    }
+
+    /**
+     * Creates a new {@link SslHandler}
+     *
+     * @see #newHandler(ByteBufAllocator, String, int, Executor)
+     */
+    public final SslHandler newHandler(ByteBufAllocator alloc, String peerHost, int peerPort) {
+        return newHandler(alloc, peerHost, peerPort, startTls);
+    }
+
+    /**
+     * Create a new SslHandler.
+     * @see #newHandler(ByteBufAllocator, String, int, boolean, Executor)
+     */
+    protected SslHandler newHandler(ByteBufAllocator alloc, String peerHost, int peerPort, boolean startTls) {
+        return new SslHandler(newEngine(alloc, peerHost, peerPort), startTls);
     }
 
     /**
      * Creates a new {@link SslHandler} with advisory peer information.
      * <p>If {@link SslProvider#OPENSSL_REFCNT} is used then the returned {@link SslHandler} will release the engine
      * that is wrapped. If the returned {@link SslHandler} is not inserted into a pipeline then you may leak native
-     * memory!</p>
+     * memory!
      * <p><b>Beware</b>: the underlying generated {@link SSLEngine} won't have
      * <a href="https://wiki.openssl.org/index.php/Hostname_validation">hostname verification</a> enabled by default.
      * If you create {@link SslHandler} for the client side and want proper security, we advice that you configure
-     * the {@link SSLEngine} (see {@link javax.net.ssl.SSLParameters#setEndpointIdentificationAlgorithm(String)}):</p>
+     * the {@link SSLEngine} (see {@link javax.net.ssl.SSLParameters#setEndpointIdentificationAlgorithm(String)}):
      * <pre>
      * SSLEngine sslEngine = sslHandler.engine();
      * SSLParameters sslParameters = sslEngine.getSSLParameters();
@@ -919,15 +966,26 @@ public abstract class SslContext {
      * sslParameters.setEndpointIdentificationAlgorithm("HTTPS");
      * sslEngine.setSSLParameters(sslParameters);
      * </pre>
-     *
+     * <p>
+     * The underlying {@link SSLEngine} may not follow the restrictions imposed by the
+     * <a href="https://docs.oracle.com/javase/7/docs/api/javax/net/ssl/SSLEngine.html">SSLEngine javadocs</a> which
+     * limits wrap/unwrap to operate on a single SSL/TLS packet.
      * @param alloc If supported by the SSLEngine then the SSLEngine will use this to allocate ByteBuf objects.
      * @param peerHost the non-authoritative name of the host
      * @param peerPort the non-authoritative port
+     * @param delegatedTaskExecutor the {@link Executor} that will be used to execute tasks that are returned by
+     *                              {@link SSLEngine#getDelegatedTask()}.
      *
      * @return a new {@link SslHandler}
      */
-    public final SslHandler newHandler(ByteBufAllocator alloc, String peerHost, int peerPort) {
-        return new SslHandler(newEngine(alloc, peerHost, peerPort), startTls);
+    public SslHandler newHandler(ByteBufAllocator alloc, String peerHost, int peerPort,
+                                 Executor delegatedTaskExecutor) {
+        return newHandler(alloc, peerHost, peerPort, startTls, delegatedTaskExecutor);
+    }
+
+    protected SslHandler newHandler(ByteBufAllocator alloc, String peerHost, int peerPort, boolean startTls,
+                                    Executor delegatedTaskExecutor) {
+        return new SslHandler(newEngine(alloc, peerHost, peerPort), startTls, delegatedTaskExecutor);
     }
 
     /**
@@ -977,9 +1035,9 @@ public abstract class SslContext {
     static KeyStore buildKeyStore(X509Certificate[] certChain, PrivateKey key, char[] keyPasswordChars)
             throws KeyStoreException, NoSuchAlgorithmException,
                    CertificateException, IOException {
-        KeyStore ks = KeyStore.getInstance("JKS");
+        KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
         ks.load(null, null);
-        ks.setKeyEntry("key", key, keyPasswordChars, certChain);
+        ks.setKeyEntry(ALIAS, key, keyPasswordChars, certChain);
         return ks;
     }
 
@@ -1019,7 +1077,7 @@ public abstract class SslContext {
                 return KeyFactory.getInstance("DSA").generatePrivate(encodedKeySpec);
             } catch (InvalidKeySpecException ignore2) {
                 try {
-                    return  KeyFactory.getInstance("EC").generatePrivate(encodedKeySpec);
+                    return KeyFactory.getInstance("EC").generatePrivate(encodedKeySpec);
                 } catch (InvalidKeySpecException e) {
                     throw new InvalidKeySpecException("Neither RSA, DSA nor EC worked", e);
                 }
@@ -1060,10 +1118,9 @@ public abstract class SslContext {
         CertificateFactory cf = CertificateFactory.getInstance("X.509");
         X509Certificate[] x509Certs = new X509Certificate[certs.length];
 
-        int i = 0;
         try {
-            for (; i < certs.length; i++) {
-                InputStream is = new ByteBufInputStream(certs[i], true);
+            for (int i = 0; i < certs.length; i++) {
+                InputStream is = new ByteBufInputStream(certs[i], false);
                 try {
                     x509Certs[i] = (X509Certificate) cf.generateCertificate(is);
                 } finally {
@@ -1076,8 +1133,8 @@ public abstract class SslContext {
                 }
             }
         } finally {
-            for (; i < certs.length; i++) {
-                certs[i].release();
+            for (ByteBuf buf: certs) {
+                buf.release();
             }
         }
         return x509Certs;
@@ -1086,7 +1143,7 @@ public abstract class SslContext {
     static TrustManagerFactory buildTrustManagerFactory(
             X509Certificate[] certCollection, TrustManagerFactory trustManagerFactory)
             throws NoSuchAlgorithmException, CertificateException, KeyStoreException, IOException {
-        KeyStore ks = KeyStore.getInstance("JKS");
+        final KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
         ks.load(null, null);
 
         int i = 1;
@@ -1125,11 +1182,7 @@ public abstract class SslContext {
                                                     KeyManagerFactory kmf)
             throws UnrecoverableKeyException, KeyStoreException, NoSuchAlgorithmException,
             CertificateException, IOException {
-        String algorithm = Security.getProperty("ssl.KeyManagerFactory.algorithm");
-        if (algorithm == null) {
-            algorithm = "SunX509";
-        }
-        return buildKeyManagerFactory(certChain, algorithm, key, keyPassword, kmf);
+        return buildKeyManagerFactory(certChain, KeyManagerFactory.getDefaultAlgorithm(), key, keyPassword, kmf);
     }
 
     static KeyManagerFactory buildKeyManagerFactory(X509Certificate[] certChainFile,
@@ -1137,8 +1190,15 @@ public abstract class SslContext {
                                                     String keyPassword, KeyManagerFactory kmf)
             throws KeyStoreException, NoSuchAlgorithmException, IOException,
             CertificateException, UnrecoverableKeyException {
-        char[] keyPasswordChars = keyPassword == null ? EmptyArrays.EMPTY_CHARS : keyPassword.toCharArray();
+        char[] keyPasswordChars = keyStorePassword(keyPassword);
         KeyStore ks = buildKeyStore(certChainFile, key, keyPasswordChars);
+        return buildKeyManagerFactory(ks, keyAlgorithm, keyPasswordChars, kmf);
+    }
+
+    static KeyManagerFactory buildKeyManagerFactory(KeyStore ks,
+                                                    String keyAlgorithm,
+                                                    char[] keyPasswordChars, KeyManagerFactory kmf)
+            throws KeyStoreException, NoSuchAlgorithmException, UnrecoverableKeyException {
         // Set up key manager factory to use our key store
         if (kmf == null) {
             kmf = KeyManagerFactory.getInstance(keyAlgorithm);
@@ -1146,5 +1206,9 @@ public abstract class SslContext {
         kmf.init(ks, keyPasswordChars);
 
         return kmf;
+    }
+
+    static char[] keyStorePassword(String keyPassword) {
+        return keyPassword == null ? EmptyArrays.EMPTY_CHARS : keyPassword.toCharArray();
     }
 }

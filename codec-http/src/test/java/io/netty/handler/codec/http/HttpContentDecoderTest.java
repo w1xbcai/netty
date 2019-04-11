@@ -21,6 +21,8 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.CodecException;
+import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.compression.ZlibCodecFactory;
 import io.netty.handler.codec.compression.ZlibDecoder;
 import io.netty.handler.codec.compression.ZlibEncoder;
@@ -32,16 +34,12 @@ import org.junit.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.CoreMatchers.is;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertThat;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.*;
 
 public class HttpContentDecoderTest {
     private static final String HELLO_WORLD = "hello, world";
@@ -89,6 +87,48 @@ public class HttpContentDecoderTest {
         assertHasInboundMessages(channel, false);
         assertHasOutboundMessages(channel, false);
         assertFalse(channel.finish()); // assert that no messages are left in channel
+    }
+
+    @Test
+    public void testChunkedRequestDecompression() {
+        HttpResponseDecoder decoder = new HttpResponseDecoder();
+        HttpContentDecoder decompressor = new HttpContentDecompressor();
+
+        EmbeddedChannel channel = new EmbeddedChannel(decoder, decompressor, null);
+
+        String headers = "HTTP/1.1 200 OK\r\n"
+                + "Transfer-Encoding: chunked\r\n"
+                + "Trailer: My-Trailer\r\n"
+                + "Content-Encoding: gzip\r\n\r\n";
+
+        channel.writeInbound(Unpooled.copiedBuffer(headers.getBytes(CharsetUtil.US_ASCII)));
+
+        String chunkLength = Integer.toHexString(GZ_HELLO_WORLD.length);
+        assertTrue(channel.writeInbound(Unpooled.copiedBuffer(chunkLength + "\r\n", CharsetUtil.US_ASCII)));
+        assertTrue(channel.writeInbound(Unpooled.copiedBuffer(GZ_HELLO_WORLD)));
+        assertTrue(channel.writeInbound(Unpooled.copiedBuffer("\r\n".getBytes(CharsetUtil.US_ASCII))));
+        assertTrue(channel.writeInbound(Unpooled.copiedBuffer("0\r\n", CharsetUtil.US_ASCII)));
+        assertTrue(channel.writeInbound(Unpooled.copiedBuffer("My-Trailer: 42\r\n\r\n\r\n", CharsetUtil.US_ASCII)));
+
+        Object ob1 = channel.readInbound();
+        assertThat(ob1, is(instanceOf(DefaultHttpResponse.class)));
+
+        Object ob2 = channel.readInbound();
+        assertThat(ob1, is(instanceOf(DefaultHttpResponse.class)));
+        HttpContent content = (HttpContent) ob2;
+        assertEquals(HELLO_WORLD, content.content().toString(CharsetUtil.US_ASCII));
+        content.release();
+
+        Object ob3 = channel.readInbound();
+        assertThat(ob1, is(instanceOf(DefaultHttpResponse.class)));
+        LastHttpContent lastContent = (LastHttpContent) ob3;
+        assertNotNull(lastContent.decoderResult());
+        assertTrue(lastContent.decoderResult().isSuccess());
+        assertFalse(lastContent.trailingHeaders().isEmpty());
+        assertEquals("42", lastContent.trailingHeaders().get("My-Trailer"));
+        assertHasInboundMessages(channel, false);
+        assertHasOutboundMessages(channel, false);
+        assertFalse(channel.finish());
     }
 
     @Test
@@ -484,6 +524,43 @@ public class HttpContentDecoderTest {
         assertHasInboundMessages(channel, true);
         assertHasOutboundMessages(channel, false);
         assertFalse(channel.finish());
+    }
+
+    @Test
+    public void testCleanupThrows() {
+        HttpContentDecoder decoder = new HttpContentDecoder() {
+            @Override
+            protected EmbeddedChannel newContentDecoder(String contentEncoding) throws Exception {
+                return new EmbeddedChannel(new ChannelInboundHandlerAdapter() {
+                    @Override
+                    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+                        ctx.fireExceptionCaught(new DecoderException());
+                        ctx.fireChannelInactive();
+                    }
+                });
+            }
+        };
+
+        final AtomicBoolean channelInactiveCalled = new AtomicBoolean();
+        EmbeddedChannel channel = new EmbeddedChannel(decoder, new ChannelInboundHandlerAdapter() {
+            @Override
+            public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+                assertTrue(channelInactiveCalled.compareAndSet(false, true));
+                super.channelInactive(ctx);
+            }
+        });
+        assertTrue(channel.writeInbound(new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/")));
+        HttpContent content = new DefaultHttpContent(Unpooled.buffer().writeZero(10));
+        assertTrue(channel.writeInbound(content));
+        assertEquals(1, content.refCnt());
+        try {
+            channel.finishAndReleaseAll();
+            fail();
+        } catch (CodecException expected) {
+            // expected
+        }
+        assertTrue(channelInactiveCalled.get());
+        assertEquals(0, content.refCnt());
     }
 
     private static byte[] gzDecompress(byte[] input) {

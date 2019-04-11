@@ -194,7 +194,7 @@ public class Http2Exception extends Exception {
     /**
      * Provides a hint as to if shutdown is justified, what type of shutdown should be executed.
      */
-    public static enum ShutdownHint {
+    public enum ShutdownHint {
         /**
          * Do not shutdown the underlying channel.
          */
@@ -252,6 +252,8 @@ public class Http2Exception extends Exception {
     }
 
     public static final class HeaderListSizeException extends StreamException {
+        private static final long serialVersionUID = -8807603212183882637L;
+
         private final boolean decode;
 
         HeaderListSizeException(int streamId, Http2Error error, String message, boolean decode) {

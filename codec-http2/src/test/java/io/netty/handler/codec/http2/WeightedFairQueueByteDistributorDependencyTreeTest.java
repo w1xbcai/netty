@@ -31,6 +31,17 @@ import static org.mockito.Mockito.doAnswer;
 
 public class WeightedFairQueueByteDistributorDependencyTreeTest extends
                                                 AbstractWeightedFairQueueByteDistributorDependencyTest {
+    private static final int leadersId = 3; // js, css
+    private static final int unblockedId = 5;
+    private static final int backgroundId = 7;
+    private static final int speculativeId = 9;
+    private static final int followersId = 11; // images
+    private static final short leadersWeight = 201;
+    private static final short unblockedWeight = 101;
+    private static final short backgroundWeight = 1;
+    private static final short speculativeWeight = 1;
+    private static final short followersWeight = 1;
+
     @Before
     public void setup() throws Http2Exception {
         MockitoAnnotations.initMocks(this);
@@ -161,17 +172,6 @@ public class WeightedFairQueueByteDistributorDependencyTreeTest extends
         assertTrue(distributor.isChild(3, 5, weight3));
         assertEquals(0, distributor.numChildren(3));
     }
-
-    private static final int leadersId = 3; // js, css
-    private static final int unblockedId = 5;
-    private static final int backgroundId = 7;
-    private static final int speculativeId = 9;
-    private static final int followersId = 11; // images
-    private static final short leadersWeight = 201;
-    private static final short unblockedWeight = 101;
-    private static final short backgroundWeight = 1;
-    private static final short speculativeWeight = 1;
-    private static final short followersWeight = 1;
 
     @Test
     public void fireFoxQoSStreamsRemainAfterDataStreamsAreClosed() throws Http2Exception {
@@ -898,5 +898,39 @@ public class WeightedFairQueueByteDistributorDependencyTreeTest extends
         // Level 4;
         assertTrue(distributor.isChild(streamE.id(), streamC.id(), DEFAULT_PRIORITY_WEIGHT));
         assertEquals(0, distributor.numChildren(streamE.id()));
+    }
+
+    // Unknown parent streams can come about in two ways:
+    //  1. Because the stream is old and its state was purged
+    //  2. This is the first reference to the stream, as implied at least by RFC7540§5.3.1:
+    //    > A dependency on a stream that is not currently in the tree — such as a stream in the
+    //    > "idle" state — results in that stream being given a default priority
+    @Test
+    public void unknownParentShouldBeCreatedUnderConnection() throws Exception {
+        setup(5);
+
+        // Purposefully avoid creating streamA's Http2Stream so that is it completely unknown.
+        // It shouldn't matter whether the ID is before or after streamB.id()
+        int streamAId = 1;
+        Http2Stream streamB = connection.local().createStream(3, false);
+
+        assertEquals(1, distributor.numChildren(connection.connectionStream().id()));
+        assertEquals(0, distributor.numChildren(streamB.id()));
+
+        // Build the tree
+        setPriority(streamB.id(), streamAId, DEFAULT_PRIORITY_WEIGHT, false);
+
+        assertEquals(1, connection.numActiveStreams());
+
+        // Level 0
+        assertEquals(1, distributor.numChildren(connection.connectionStream().id()));
+
+        // Level 1
+        assertTrue(distributor.isChild(streamAId, connection.connectionStream().id(), DEFAULT_PRIORITY_WEIGHT));
+        assertEquals(1, distributor.numChildren(streamAId));
+
+        // Level 2
+        assertTrue(distributor.isChild(streamB.id(), streamAId, DEFAULT_PRIORITY_WEIGHT));
+        assertEquals(0, distributor.numChildren(streamB.id()));
     }
 }
